@@ -1,0 +1,21 @@
+Vagrant.configure("2") do |config|
+
+  config.vm.box = "ubuntu/trusty64"
+  config.vm.hostname = "client"
+  config.ssh.forward_agent = true
+
+  # Use NFS for shared folders for better performance
+  config.vm.network :private_network, ip: '10.10.1.3' # Uncomment to use NFS
+  config.vm.synced_folder '.', '/vagrant', nfs: true # Uncomment to use NFS
+
+  config.vm.network "forwarded_port", guest: 6666, host: 6666
+
+  config.vm.provider :virtualbox do |vb|
+    vb.name = Dir.pwd().split("/")[-1] + "-" + Time.now.to_f.to_i.to_s
+    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    vb.customize [ "guestproperty", "set", :id, "--timesync-threshold", 10000 ]
+    vb.memory = 512
+    vb.cpus = 1
+  end
+
+end
