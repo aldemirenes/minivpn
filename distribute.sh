@@ -1,6 +1,6 @@
 #/bin/bash
 
-tunclient_name="tunclient"
+tunclient_name="simpletun/tunclient"
 vms_folder_path="./vms"
 server="$vms_folder_path/server"
 client="$vms_folder_path/client"

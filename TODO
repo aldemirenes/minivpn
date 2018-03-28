@@ -1,0 +1,2 @@
+- Add scripts to run at the setup of the Vagrant machines
+- Install libssl-dev in these scripts 
