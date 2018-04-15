@@ -14,15 +14,110 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define BUFLEN 512  //Max length of buffer
-#define PORT 8888   //The port on which to listen for incoming data
- 
+#define PORT 5555   //The port on which to listen for incoming data
+#define SSL_CERT "/vagrant/cert.pem"
+#define SSL_KEY "/vagrant/key.pem"
+
 typedef struct DataChannelInput { 
     char* if_name;
     int port; 
     int tun_tap_flag;
 } DataChannelInput;
+
+typedef struct ControlChannelInput { 
+    int port; 
+} ControlChannelInput;
+
+void init_openssl() { 
+    SSL_load_error_strings();	
+    OpenSSL_add_ssl_algorithms();
+}
+
+void cleanup_openssl() {
+    EVP_cleanup();
+}
+
+SSL_CTX *create_context(){
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
+
+    method = SSLv3_server_method();
+
+    ctx = SSL_CTX_new(method);
+    if (!ctx) {
+      perror("Unable to create SSL context");
+      ERR_print_errors_fp(stderr);
+      exit(EXIT_FAILURE);
+    }
+
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx) {
+    /* Set the key and cert */
+    if (SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+	exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, SSL_KEY, SSL_FILETYPE_PEM) <= 0 ) {
+        ERR_print_errors_fp(stderr);
+	exit(EXIT_FAILURE);
+    }
+}
+
+/**************************************************************************
+ * ssl_cread: read routine that checks for errors and exits if an error is    *
+ *        returned.                                                       *
+ **************************************************************************/
+int ssl_cread(SSL *clientssl, char *buf, int n){
+  
+  int nread;
+
+  if((nread=SSL_read(clientssl, buf, n)) < 0){
+    perror("Reading data");
+    exit(1);
+  }
+  return nread;
+}
+
+/**************************************************************************
+ * ssl_cwrite: write routine that checks for errors and exits if an error is  *
+ *         returned.                                                      *
+ **************************************************************************/
+int ssl_cwrite(SSL *clientssl, char *buf, int n){
+  
+  int nwrite;
+
+  if((nwrite=SSL_write(clientssl, buf, n)) < 0){
+    perror("Writing data");
+    exit(1);
+  }
+  return nwrite;
+}
+
+/**************************************************************************
+ * ssl_read_n: ensures we read exactly n bytes, and puts them into "buf".     *
+ *         (unless EOF, of course)                                        *
+ **************************************************************************/
+int ssl_read_n(SSL *clientssl, char *buf, int n) {
+
+  int nread, left = n;
+
+  while(left > 0) {
+    if ((nread = ssl_cread(clientssl, buf, left)) == 0){
+      return 0 ;      
+    }else {
+      left -= nread;
+      buf += nread;
+    }
+  }
+  return n;  
+}
 
 /**************************************************************************
  * cread: read routine that checks for errors and exits if an error is    *
@@ -228,6 +323,113 @@ void* startDataChannel(void* args) {
  
     close(net_fd);
     pthread_exit(0);    
+}
+
+void* startControlChannel(void* args) {
+    printf("in control channel\n");
+
+    uint16_t nread, nwrite, plength;
+    char buffer[BUFLEN];
+    struct sockaddr_in remote, local;
+    unsigned short int port = PORT;
+    int net_fd, sock_fd, optval = 1;
+    socklen_t remotelen;    
+    SSL_CTX *ctx;
+    SSL *serverssl;
+    int ret;
+
+    ControlChannelInput* input = (ControlChannelInput*) args;
+    port = input->port;
+
+    if ( (sock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket()");
+        pthread_exit(0);        
+    }
+
+    /* avoid EADDRINUSE error on bind() */
+    if(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&optval, sizeof(optval)) < 0) {
+        perror("setsockopt()");
+        pthread_exit(0);
+    }
+
+    /* openssl related things */
+    init_openssl();
+    ctx = create_context();
+    configure_context(ctx);
+    
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = htons(port);
+    if (bind(sock_fd, (struct sockaddr*) &local, sizeof(local)) < 0) {
+        perror("bind()");
+        pthread_exit(0);        
+    }
+    
+    if (listen(sock_fd, 5) < 0) {
+        perror("listen()");
+        pthread_exit(0);        
+    }
+    
+    /* wait for connection request */
+    remotelen = sizeof(remote);
+    memset(&remote, 0, remotelen);
+    if ((net_fd = accept(sock_fd, (struct sockaddr*)&remote, &remotelen)) < 0) {
+        perror("accept()");
+        pthread_exit(0);                
+    }
+
+    serverssl = SSL_new(ctx);
+    if(!serverssl)
+    {
+        printf("Error SSL_new\n");
+        pthread_exit(0);        
+    }
+    SSL_set_fd(serverssl, net_fd);
+    
+    if((ret = SSL_accept(serverssl))!= 1)
+    {
+        printf("Handshake Error %d\n", SSL_get_error(serverssl, ret));
+        pthread_exit(0);
+    }
+
+    while(1) {
+        int ret;
+        fd_set rd_set;
+
+        FD_ZERO(&rd_set);
+        FD_SET(net_fd, &rd_set);
+
+        ret = select(net_fd + 1, &rd_set, NULL, NULL, NULL);
+
+        if (ret < 0 && errno == EINTR){
+            continue;
+        }
+
+        if (ret < 0) {
+            perror("select()");
+            pthread_exit(0);
+        }
+
+        if(FD_ISSET(net_fd, &rd_set)) {
+            printf("data on wire");
+            nread = ssl_read_n(serverssl, (char *)&plength, sizeof(plength));
+            if(nread == 0) {
+                /* ctrl-c at the other end */
+                break;
+            }
+
+            /* read packet */
+            nread = ssl_read_n(serverssl, buffer, ntohs(plength));
+            printf(buffer);
+        }
+    }
+  
+    SSL_shutdown(serverssl);
+    close(sock_fd);
+    close(net_fd);
+    SSL_free(serverssl);
+    SSL_CTX_free(ctx);
 
 }
 
@@ -259,17 +461,28 @@ int main(int argc, char *argv[])
         }
     }
 
-    pthread_t tid;
+    // construct and start thread for data channel
+    pthread_t dataChannelTid;
     DataChannelInput* dataChannelInput = malloc(sizeof(DataChannelInput));
-    dataChannelInput->port = PORT;
+    dataChannelInput->port = port;
     dataChannelInput->if_name = &if_name;
     dataChannelInput->tun_tap_flag = flags;
-    err = pthread_create(&tid, NULL, startDataChannel, (void*) dataChannelInput);
+    err = pthread_create(&dataChannelTid, NULL, startDataChannel, (void*) dataChannelInput);
     if (err != 0) {
         printf("can't create thread :[%s]\n", strerror(err));
     }
-    pthread_join(tid, NULL); 
 
-   
+    // construct and start thread for control channel
+    pthread_t controlChannelTid;
+    ControlChannelInput* controlChannelInput = malloc(sizeof(ControlChannelInput));
+    controlChannelInput->port = port;
+    err = pthread_create(&controlChannelTid, NULL, startControlChannel, (void*) controlChannelInput);
+    if (err != 0) {
+        printf("can't create thread :[%s]\n", strerror(err));
+    }
+
+    pthread_join(dataChannelTid, NULL); 
+    pthread_join(controlChannelTid, NULL); 
+
     return 0;
 }
