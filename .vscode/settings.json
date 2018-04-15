@@ -1,5 +1,12 @@
 {
     "files.associations": {
-        "queue": "c"
+        "queue": "c",
+        "errno.h": "c",
+        "stdarg.h": "c",
+        "if.h": "c",
+        "fcntl.h": "c",
+        "ioctl.h": "c",
+        "unistd.h": "c",
+        "pthread.h": "c"
     }
 }
