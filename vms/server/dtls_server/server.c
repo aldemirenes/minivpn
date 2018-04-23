@@ -38,6 +38,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <net/if.h>
+#include <linux/if_tun.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <stdarg.h>
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
@@ -50,6 +59,8 @@
 
 #define SSL_CERT "/vagrant/cert.pem"
 #define SSL_KEY "/vagrant/key.pem"
+#define TUN_IF_NAME "tun0"
+
 
 typedef union {
 	struct sockaddr_storage ss;
@@ -414,7 +425,7 @@ configure_context(SSL_CTX* ctx)
 	/* We accept all ciphers, including NULL.
 	 * Not recommended beyond testing and debugging
 	 */
-	SSL_CTX_set_cipher_list(ctx, "ALL:NULL:eNULL:aNULL");
+	// SSL_CTX_set_cipher_list(ctx, "ALL:NULL:eNULL:aNULL");
 	SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
 
 	if (!SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM))
@@ -608,6 +619,63 @@ ssl_read(SSL* ssl, char* buf, int length)
 	return len;
 }
 
+int 
+cread(int fd, char *buf, int n)
+{
+  
+  int nread;
+
+  if((nread=read(fd, buf, n)) < 0){
+    printf("Reading data\n");
+    exit(1);
+  }
+  return nread;
+}
+
+int
+cwrite(int fd, char *buf, int n)
+{
+  
+  int nwrite;
+
+  if((nwrite=write(fd, buf, n)) < 0){
+    printf("Writing data\n");
+    exit(1);
+  }
+  return nwrite;
+}
+
+int 
+tun_alloc(char *dev, int flags) 
+{
+  struct ifreq ifr;
+  int fd, err;
+  char *clonedev = "/dev/net/tun";
+
+  if( (fd = open(clonedev , O_RDWR)) < 0 ) {
+    printf("Opening /dev/net/tun\n");
+    return fd;
+  }
+
+  memset(&ifr, 0, sizeof(ifr));
+
+  ifr.ifr_flags = flags;
+
+  if (*dev) {
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+  }
+
+  if( (err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0 ) {
+    printf("ioctl(TUNSETIFF)\n");
+    close(fd);
+    return err;
+  }
+
+  strcpy(dev, ifr.ifr_name);
+
+  return fd;
+}
+
 void* 
 connection_handle(void *info) 
 {
@@ -616,10 +684,11 @@ connection_handle(void *info)
 	char addrbuf[INET6_ADDRSTRLEN];
 	PassInfo* pinfo = info;
 	SSL *ssl = pinfo->ssl;
-	int fd, reading = 0, ret, res;
+	int fd, tap_fd, max_fd, res;
 	const int on = 1, off = 0;
 	struct timeval timeout;
 	int num_timeouts = 0, max_timeouts = 5;
+	char if_name[IFNAMSIZ];
 
 	fd = create_socket_connect_client(&pinfo->client_addr, &pinfo->server_addr);
 	if (fd < 0) {
@@ -630,6 +699,15 @@ connection_handle(void *info)
 	if (res < 0) {
 		goto cleanup;
 	}
+
+	/* initialize tun/tap interface */
+	strncpy(if_name, TUN_IF_NAME, IFNAMSIZ-1);
+	if ( (tap_fd = tun_alloc(if_name, IFF_TUN | IFF_NO_PI)) < 0 ) {
+		printf("Error connecting to tun/tap interface %s!\n", TUN_IF_NAME);
+		exit(1);
+	}
+
+	max_fd = (tap_fd > fd) ? tap_fd : fd;
 
 	if (verbose) {
 		if (pinfo->client_addr.ss.ss_family == AF_INET) {
@@ -653,18 +731,35 @@ connection_handle(void *info)
 		printf ("\n------------------------------------------------------------\n\n");
 	}
 
-	while (!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN) && num_timeouts < max_timeouts) {
+	while(1) {
+		int ret;
+		fd_set rd_set;
 
-		len = ssl_read(ssl, buf, sizeof(buf));
-		if (len < 0) {
-			goto cleanup;
+		FD_ZERO(&rd_set);
+		FD_SET(tap_fd, &rd_set); FD_SET(fd, &rd_set);
+
+		ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
+
+		if (ret < 0 && errno == EINTR){
+			continue;
 		}
 
-		if (len > 0) {
+		if (ret < 0) {
+			printf("select()\n");
+			exit(1);
+		}
+
+    	if(FD_ISSET(tap_fd, &rd_set)) {
+			len = cread(tap_fd, buf, BUFFER_SIZE);
 			len = ssl_write(ssl, buf, len);
 		}
+		
+		if(FD_ISSET(fd, &rd_set)) {
+			len = ssl_read(ssl, buf, BUFFER_SIZE);
+			len = cwrite(tap_fd, buf, len);
+		}
 	}
-
+	
 	SSL_shutdown(ssl);
 
 cleanup:

@@ -38,6 +38,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <net/if.h>
+#include <linux/if_tun.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <stdarg.h>
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
@@ -50,6 +59,7 @@
 
 #define SSL_CERT "/vagrant/cert.pem"
 #define SSL_KEY "/vagrant/key.pem"
+#define TUN_IF_NAME "tun0"
 
 typedef union {
 	struct sockaddr_storage ss;
@@ -157,7 +167,7 @@ create_socket(RemoteAddress* remote_addr, char* remote_address_str, int port)
 
 	int fd = socket(remote_addr->ss.ss_family, SOCK_DGRAM, 0);
 	if (fd < 0) {
-		perror("socket can not be created\n");
+		printf("socket can not be created\n");
 		exit(-1);
 	}
 	return fd;
@@ -177,7 +187,7 @@ create_context()
 	SSL_CTX* ctx = SSL_CTX_new(method);
 
 	if (!ctx) {
-		perror("Unable to create SSL context");
+		printf("Unable to create SSL context");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
     }
@@ -188,7 +198,7 @@ create_context()
 void
 configure_context(SSL_CTX *ctx)
 {
-	SSL_CTX_set_cipher_list(ctx, "eNULL:!MD5");
+	// SSL_CTX_set_cipher_list(ctx, "eNULL:!MD5");
 
 	if (!SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM))
 		printf("\nERROR: no certificate found!");
@@ -230,7 +240,7 @@ connect_with_ssl(int fd, RemoteAddress* remote_addr)
 	SSL_set_bio(ssl, bio, bio);
 
 	if (SSL_connect(ssl) < 0) {
-		perror("SSL_connect");
+		printf("SSL_connect");
 		printf("%s\n", ERR_error_string(ERR_get_error(), buf));
 		exit(-1);
 	}
@@ -315,21 +325,88 @@ ssl_read(SSL* ssl, char* buf, int length)
 	return len;
 }
 
+int 
+cread(int fd, char *buf, int n)
+{
+  
+  int nread;
+
+  if((nread=read(fd, buf, n)) < 0){
+    printf("Reading data\n");
+    exit(1);
+  }
+  return nread;
+}
+
+int
+cwrite(int fd, char *buf, int n)
+{
+  
+  int nwrite;
+
+  if((nwrite=write(fd, buf, n)) < 0){
+    printf("Writing data\n");
+    exit(1);
+  }
+  return nwrite;
+}
+
+int 
+tun_alloc(char *dev, int flags) 
+{
+  struct ifreq ifr;
+  int fd, err;
+  char *clonedev = "/dev/net/tun";
+
+  if( (fd = open(clonedev , O_RDWR)) < 0 ) {
+    printf("Opening /dev/net/tun\n");
+    return fd;
+  }
+
+  memset(&ifr, 0, sizeof(ifr));
+
+  ifr.ifr_flags = flags;
+
+  if (*dev) {
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+  }
+
+  if( (err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0 ) {
+    printf("ioctl(TUNSETIFF)\n");
+    close(fd);
+    return err;
+  }
+
+  strcpy(dev, ifr.ifr_name);
+
+  return fd;
+}
+
 void 
 start_client(char *remote_address, int port, int length, int messagenumber) 
 {
-	int fd;
+	int fd, tap_fd, max_fd;
 	char buf[BUFFER_SIZE];
 	char addrbuf[INET6_ADDRSTRLEN];
 	socklen_t len;
 	SSL_CTX *ctx;
 	SSL *ssl;
 	BIO *bio;
-	int reading = 0;
 	struct timeval timeout;
 	RemoteAddress remote_addr;
+	char if_name[IFNAMSIZ];
+
 	fd = create_socket(&remote_addr, remote_address, port);
 	ssl = connect_with_ssl(fd, &remote_addr);
+
+	/* initialize tun/tap interface */
+	strncpy(if_name, TUN_IF_NAME, IFNAMSIZ-1);
+	if ( (tap_fd = tun_alloc(if_name, IFF_TUN | IFF_NO_PI)) < 0 ) {
+		printf("Error connecting to tun/tap interface %s!\n", if_name);
+		exit(1);
+	}
+
+	max_fd = (tap_fd > fd) ? tap_fd : fd;
 
 	if (verbose) {
 		if (remote_addr.ss.ss_family == AF_INET) {
@@ -349,29 +426,32 @@ start_client(char *remote_address, int port, int length, int messagenumber)
 		printf ("\n------------------------------------------------------------\n\n");
 	}
 
-	while (!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN)) {
+	while(1) {
+		int ret;
+	    fd_set rd_set;
+		
+		FD_ZERO(&rd_set);
+		FD_SET(tap_fd, &rd_set); FD_SET(fd, &rd_set);
 
-		if (messagenumber > 0) {
+		ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
 
-			len = ssl_write(ssl, buf, length);
-			messagenumber--;
-			if (len < 0) {
-				exit(-1);
-			}
-#if 0
-			/* Send heartbeat. Requires Heartbeat extension. */
-			if (messagenumber == 2)
-				SSL_heartbeat(ssl);
-#endif
-
-			/* Shut down if all messages sent */
-			if (messagenumber == 0)
-				SSL_shutdown(ssl);
+		if (ret < 0 && errno == EINTR){
+			continue;
 		}
 
-		len = ssl_read(ssl, buf, sizeof(buf));
-		if (len < 0) {
-			exit(-1);
+		if (ret < 0) {
+			printf("select()\n");
+			exit(1);
+		}
+
+    	if(FD_ISSET(tap_fd, &rd_set)) {
+			len = cread(tap_fd, buf, BUFFER_SIZE);
+			len = ssl_write(ssl, buf, len);
+		}
+		
+		if(FD_ISSET(fd, &rd_set)) {
+			len = ssl_read(ssl, buf, BUFFER_SIZE);
+			len = cwrite(tap_fd, buf, len);
 		}
 	}
 
