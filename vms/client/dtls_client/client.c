@@ -466,7 +466,8 @@ main(int argc, char **argv)
 	int port = 23232;
 	int length = 100;
 	int messagenumber = 5;
-	char remote_addr[INET6_ADDRSTRLEN+1] = "10.10.1.2";	
+	// char remote_addr[INET6_ADDRSTRLEN+1] = "10.10.1.2";	
+	char remote_addr[INET6_ADDRSTRLEN+1] = "167.99.32.110";	
 
     start_client(remote_addr, port, length, messagenumber);
 	return 0;

@@ -1,0 +1,28 @@
+# remove default gateway from the routing table and add only
+# server ip address as destination from the eth0 interface
+# all traffic except to the server should be directed to the
+# tun interface. Reason of this is our vpn connection 
+# must continue to be connected with server in order to continue
+# to run VPN. 
+
+Example commands:
+sudo route add -net 167.99.32.110 gw 10.0.2.2 netmask 255.255.255.255 dev eth0
+sudo route del -net 0.0.0.0 gw 10.0.2.2 netmask 0.0.0.0 dev eth0
+sudo route add default gw 10.0.3.3
+
+Routing table before commands:
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         10.0.2.2        0.0.0.0         UG    0      0        0 eth0
+10.0.2.0        0.0.0.0         255.255.255.0   U     0      0        0 eth0
+10.0.3.0        0.0.0.0         255.255.255.0   U     0      0        0 tun0
+10.10.1.0       0.0.0.0         255.255.255.0   U     0      0        0 eth1
+
+Routing table after commands:
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         10.0.3.3        0.0.0.0         UG    0      0        0 tun0
+10.0.2.0        0.0.0.0         255.255.255.0   U     0      0        0 eth0
+10.0.3.0        0.0.0.0         255.255.255.0   U     0      0        0 tun0
+10.10.1.0       0.0.0.0         255.255.255.0   U     0      0        0 eth1
+167.99.32.110   10.0.2.2        255.255.255.255 UGH   0      0        0 eth0
