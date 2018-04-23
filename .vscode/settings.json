@@ -9,6 +9,7 @@
         "unistd.h": "c",
         "pthread.h": "c",
         "memory": "c",
-        "functional": "c"
+        "functional": "c",
+        "inet.h": "c"
     }
 }
