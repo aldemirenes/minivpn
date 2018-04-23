@@ -51,6 +51,17 @@
 #define SSL_CERT "/vagrant/cert.pem"
 #define SSL_KEY "/vagrant/key.pem"
 
+typedef union {
+	struct sockaddr_storage ss;
+	struct sockaddr_in s4;
+	struct sockaddr_in6 s6;
+} RemoteAddress;
+
+typedef struct PassInfo {
+	RemoteAddress server_addr, client_addr;
+	SSL *ssl;
+} PassInfo;
+
 int verbose = 1;
 int veryverbose = 1;
 unsigned char cookie_secret[COOKIE_SECRET_LENGTH];
@@ -68,18 +79,24 @@ char Usage[] =
 
 static pthread_mutex_t* mutex_buf = NULL;
 
-static void locking_function(int mode, int n, const char *file, int line) {
+static void 
+locking_function(int mode, int n, const char *file, int line) 
+{
 	if (mode & CRYPTO_LOCK)
 		pthread_mutex_lock(&mutex_buf[n]);
 	else
 		pthread_mutex_unlock(&mutex_buf[n]);
 }
 
-static unsigned long id_function(void) {
+static unsigned long 
+id_function(void) 
+{
 	return (unsigned long) pthread_self();
 }
 
-int THREAD_setup() {
+int 
+THREAD_setup() 
+{
 	int i;
 
 	mutex_buf = (pthread_mutex_t*) malloc(CRYPTO_num_locks() * sizeof(pthread_mutex_t));
@@ -92,7 +109,9 @@ int THREAD_setup() {
 	return 1;
 }
 
-int THREAD_cleanup() {
+int 
+THREAD_cleanup() 
+{
 	int i;
 
 	if (!mutex_buf)
@@ -107,7 +126,9 @@ int THREAD_cleanup() {
 	return 1;
 }
 
-int handle_socket_error() {
+int 
+handle_socket_error() 
+{
 	switch (errno) {
 		case EINTR:
 			/* Interrupted system call.
@@ -165,8 +186,9 @@ int handle_socket_error() {
 	return 0;
 }
 
-int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
-	{
+int 
+generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
+{
 	unsigned char *buffer, result[EVP_MAX_MD_SIZE];
 	unsigned int length = 0, resultlength;
 	union {
@@ -244,8 +266,9 @@ int generate_cookie(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
 	return 1;
 }
 
-int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len)
-	{
+int 
+verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len)
+{
 	unsigned char *buffer, result[EVP_MAX_MD_SIZE];
 	unsigned int length = 0, resultlength;
 	union {
@@ -316,15 +339,6 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 	return 0;
 	}
 
-struct pass_info {
-	union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in6 s6;
-		struct sockaddr_in s4;
-	} server_addr, client_addr;
-	SSL *ssl;
-};
-
 int dtls_verify_callback (int ok, X509_STORE_CTX *ctx) {
 	/* This function should ask the user
 	 * if he trusts the received certificate.
@@ -333,48 +347,177 @@ int dtls_verify_callback (int ok, X509_STORE_CTX *ctx) {
 	return 1;
 }
 
-void* connection_handle(void *info) {
-	ssize_t len;
-	char buf[BUFFER_SIZE];
-	char addrbuf[INET6_ADDRSTRLEN];
-	struct pass_info *pinfo = (struct pass_info*) info;
-	SSL *ssl = pinfo->ssl;
-	int fd, reading = 0, ret;
-	const int on = 1, off = 0;
-	struct timeval timeout;
-	int num_timeouts = 0, max_timeouts = 5;
+int
+create_socket(RemoteAddress* server_addr, char* local_address_str, int port)
+{
+	memset(server_addr, 0, sizeof(struct sockaddr_storage));
+	
+	if (strlen(local_address_str) == 0) {
+		server_addr->s6.sin6_family = AF_INET6;
+#ifdef HAVE_SIN6_LEN
+		server_addr->s6.sin6_len = sizeof(struct sockaddr_in6);
+#endif
+		server_addr->s6.sin6_addr = in6addr_any;
+		server_addr->s6.sin6_port = htons(port);
+	} else {
+		if (inet_pton(AF_INET, local_address_str, &server_addr->s4.sin_addr) == 1) {
+			server_addr->s4.sin_family = AF_INET;
+#ifdef HAVE_SIN_LEN
+			server_addr->s4.sin_len = sizeof(struct sockaddr_in);
+#endif
+			server_addr->s4.sin_port = htons(port);
+		} else if (inet_pton(AF_INET6, local_address_str, &server_addr->s6.sin6_addr) == 1) {
+			server_addr->s6.sin6_family = AF_INET6;
+#ifdef HAVE_SIN6_LEN
+			server_addr->s6.sin6_len = sizeof(struct sockaddr_in6);
+#endif
+			server_addr->s6.sin6_port = htons(port);
+		} else {
+			return;
+		}
+	}
 
-	OPENSSL_assert(pinfo->client_addr.ss.ss_family == pinfo->server_addr.ss.ss_family);
-	fd = socket(pinfo->client_addr.ss.ss_family, SOCK_DGRAM, 0);
+	int fd = socket(server_addr->ss.ss_family, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		perror("socket can not be created\n");
+		exit(-1);
+	}
+
+	return fd;
+}
+
+void 
+init_openssl()
+{
+	OpenSSL_add_ssl_algorithms();
+	SSL_load_error_strings();
+}
+
+SSL_CTX* 
+create_context()
+{
+    const SSL_METHOD* method = DTLSv1_server_method();
+	SSL_CTX* ctx = SSL_CTX_new(method);
+
+	if (!ctx) {
+		perror("Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+    }
+
+	return ctx;
+}
+
+void
+configure_context(SSL_CTX* ctx)
+{
+	/* We accept all ciphers, including NULL.
+	 * Not recommended beyond testing and debugging
+	 */
+	SSL_CTX_set_cipher_list(ctx, "ALL:NULL:eNULL:aNULL");
+	SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+
+	if (!SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM))
+		printf("\nERROR: no certificate found!");
+
+	if (!SSL_CTX_use_PrivateKey_file(ctx, SSL_KEY, SSL_FILETYPE_PEM))
+		printf("\nERROR: no private key found!");
+
+	if (!SSL_CTX_check_private_key (ctx))
+		printf("\nERROR: invalid private key!");
+
+	/* Client has to authenticate */
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, dtls_verify_callback);
+
+	SSL_CTX_set_read_ahead(ctx, 1);
+	SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
+	SSL_CTX_set_cookie_verify_cb(ctx, &verify_cookie);
+}
+
+SSL_CTX*
+create_configure_context()
+{
+	init_openssl();
+	SSL_CTX* ctx = create_context();
+	configure_context(ctx);
+	return ctx;
+}
+
+SSL*
+listen_with_ssl(int fd, SSL_CTX* ctx, RemoteAddress* client_addr) 
+{
+		SSL *ssl;
+		BIO *bio;
+		struct timeval timeout;
+		
+		memset(client_addr, 0, sizeof(struct sockaddr_storage));
+
+		/* Create BIO */
+		bio = BIO_new_dgram(fd, BIO_NOCLOSE);
+
+		/* Set and activate timeouts */
+		timeout.tv_sec = 5;
+		timeout.tv_usec = 0;
+		BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
+
+		ssl = SSL_new(ctx);
+
+		SSL_set_bio(ssl, bio, bio);
+		SSL_set_options(ssl, SSL_OP_COOKIE_EXCHANGE);
+
+		// block until there is a request from new client
+		while (DTLSv1_listen(ssl, client_addr) <= 0);
+		
+		return ssl;
+}
+
+int
+create_socket_connect_client(RemoteAddress* client_addr, RemoteAddress* server_addr)
+{
+	const int on = 1, off = 0;
+	int fd;
+
+	OPENSSL_assert(client_addr->ss.ss_family == server_addr->ss.ss_family);
+	fd = socket(client_addr->ss.ss_family, SOCK_DGRAM, 0);
 	if (fd < 0) {
 		perror("socket");
-		goto cleanup;
+		return -1;
 	}
 
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &on, (socklen_t) sizeof(on));
 #ifdef SO_REUSEPORT
 	setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const void*) &on, (socklen_t) sizeof(on));
 #endif
-	switch (pinfo->client_addr.ss.ss_family) {
+	switch (client_addr->ss.ss_family) {
 		case AF_INET:
 			printf("AF_INET_CLIENT");
 			// bind(fd, (const struct sockaddr *) &pinfo->server_addr, sizeof(struct sockaddr_in));
-			connect(fd, (struct sockaddr *) &pinfo->client_addr, sizeof(struct sockaddr_in));
+			connect(fd, (struct sockaddr *) client_addr, sizeof(struct sockaddr_in));
 			break;
 		case AF_INET6:
 			printf("AF_INET6_CLIENT");		
 			setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&off, sizeof(off));
-			bind(fd, (const struct sockaddr *) &pinfo->server_addr, sizeof(struct sockaddr_in6));
-			connect(fd, (struct sockaddr *) &pinfo->client_addr, sizeof(struct sockaddr_in6));
+			bind(fd, (const struct sockaddr *) server_addr, sizeof(struct sockaddr_in6));
+			connect(fd, (struct sockaddr *) client_addr, sizeof(struct sockaddr_in6));
 			break;
 		default:
 			OPENSSL_assert(0);
 			break;
 	}
 
+	return fd;
+}
+
+int 
+ssl_accept(SSL* ssl, int fd, RemoteAddress* client_addr)
+{
+	int ret;
+	char buf[BUFFER_SIZE];	
+	struct timeval timeout;
+
 	/* Set new fd and set BIO to connected */
 	BIO_set_fd(SSL_get_rbio(ssl), fd, BIO_NOCLOSE);
-	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &pinfo->client_addr.ss);
+	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client_addr->ss);
 
 	/* Finish handshake */
 	do { ret = SSL_accept(ssl); }
@@ -382,13 +525,111 @@ void* connection_handle(void *info) {
 	if (ret < 0) {
 		perror("SSL_accept");
 		printf("%s\n", ERR_error_string(ERR_get_error(), buf));
-		goto cleanup;
+		return -1;
 	}
 
 	/* Set and activate timeouts */
 	timeout.tv_sec = 5;
 	timeout.tv_usec = 0;
 	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
+	
+	return 0;
+}
+
+int 
+ssl_write(SSL* ssl, char* buf, int length)
+{
+	int len = SSL_write(ssl, buf, length);
+
+	switch (SSL_get_error(ssl, len)) {
+		case SSL_ERROR_NONE:
+			if (verbose) {
+				printf("wrote %d bytes\n", (int) len);
+			}
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			/* Just try again later */
+			break;
+		case SSL_ERROR_WANT_READ:
+			/* continue with reading */
+			break;
+		case SSL_ERROR_SYSCALL:
+			printf("Socket write error: ");
+			if (!handle_socket_error()) return -1;
+			break;
+		case SSL_ERROR_SSL:
+			printf("SSL write error: ");
+			printf("%s (%d)\n", ERR_error_string(ERR_get_error(), buf), SSL_get_error(ssl, len));
+			return -1;
+			break;
+		default:
+			printf("Unexpected error while writing!\n");
+			return -1;
+			break;
+	}
+
+	return len;
+}
+
+int
+ssl_read(SSL* ssl, char* buf, int length) 
+{
+	int len = SSL_read(ssl, buf, length);
+
+	switch (SSL_get_error(ssl, len)) {
+		case SSL_ERROR_NONE:
+			if (verbose) {
+				printf("read %d bytes\n", (int) len);
+			}
+			break;
+		case SSL_ERROR_WANT_READ:
+			/* Stop reading on socket timeout, otherwise try again */
+			if (BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_GET_RECV_TIMER_EXP, 0, NULL)) {
+				printf("Timeout! No response received.\n");
+			}
+			break;
+		case SSL_ERROR_ZERO_RETURN:
+			break;
+		case SSL_ERROR_SYSCALL:
+			printf("Socket read error: ");
+			if (!handle_socket_error()) return -1;
+			break;
+		case SSL_ERROR_SSL:
+			printf("SSL read error: ");
+			printf("%s (%d)\n", ERR_error_string(ERR_get_error(), buf), SSL_get_error(ssl, len));
+			return -1;
+			break;
+		default:
+			printf("Unexpected error while reading!\n");
+			return -1;
+			break;
+	}
+	
+	return len;
+}
+
+void* 
+connection_handle(void *info) 
+{
+	ssize_t len;
+	char buf[BUFFER_SIZE];
+	char addrbuf[INET6_ADDRSTRLEN];
+	PassInfo* pinfo = info;
+	SSL *ssl = pinfo->ssl;
+	int fd, reading = 0, ret, res;
+	const int on = 1, off = 0;
+	struct timeval timeout;
+	int num_timeouts = 0, max_timeouts = 5;
+
+	fd = create_socket_connect_client(&pinfo->client_addr, &pinfo->server_addr);
+	if (fd < 0) {
+		goto cleanup;
+	}
+
+	res = ssl_accept(ssl, fd, &pinfo->client_addr);
+	if (res < 0) {
+		goto cleanup;
+	}
 
 	if (verbose) {
 		if (pinfo->client_addr.ss.ss_family == AF_INET) {
@@ -414,77 +655,13 @@ void* connection_handle(void *info) {
 
 	while (!(SSL_get_shutdown(ssl) & SSL_RECEIVED_SHUTDOWN) && num_timeouts < max_timeouts) {
 
-		reading = 1;
-		while (reading) {
-			len = SSL_read(ssl, buf, sizeof(buf));
-
-			switch (SSL_get_error(ssl, len)) {
-				case SSL_ERROR_NONE:
-					if (verbose) {
-						printf("Thread %lx: read %d bytes\n", id_function(), (int) len);
-					}
-					reading = 0;
-					break;
-				case SSL_ERROR_WANT_READ:
-					/* Handle socket timeouts */
-					if (BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_GET_RECV_TIMER_EXP, 0, NULL)) {
-						num_timeouts++;
-						reading = 0;
-					}
-					/* Just try again */
-					break;
-				case SSL_ERROR_ZERO_RETURN:
-					reading = 0;
-					break;
-				case SSL_ERROR_SYSCALL:
-					printf("Socket read error: ");
-					if (!handle_socket_error()) goto cleanup;
-					reading = 0;
-					break;
-				case SSL_ERROR_SSL:
-					printf("SSL read error: ");
-					printf("%s (%d)\n", ERR_error_string(ERR_get_error(), buf), SSL_get_error(ssl, len));
-					goto cleanup;
-					break;
-				default:
-					printf("Unexpected error while reading!\n");
-					goto cleanup;
-					break;
-			}
+		len = ssl_read(ssl, buf, sizeof(buf));
+		if (len < 0) {
+			goto cleanup;
 		}
 
 		if (len > 0) {
-			len = SSL_write(ssl, buf, len);
-
-			switch (SSL_get_error(ssl, len)) {
-				case SSL_ERROR_NONE:
-					if (verbose) {
-						printf("Thread %lx: wrote %d bytes\n", id_function(), (int) len);
-					}
-					break;
-				case SSL_ERROR_WANT_WRITE:
-					/* Can't write because of a renegotiation, so
-					 * we actually have to retry sending this message...
-					 */
-					break;
-				case SSL_ERROR_WANT_READ:
-					/* continue with reading */
-					break;
-				case SSL_ERROR_SYSCALL:
-					printf("Socket write error: ");
-					if (!handle_socket_error()) goto cleanup;
-					//reading = 0;
-					break;
-				case SSL_ERROR_SSL:
-					printf("SSL write error: ");
-					printf("%s (%d)\n", ERR_error_string(ERR_get_error(), buf), SSL_get_error(ssl, len));
-					goto cleanup;
-					break;
-				default:
-					printf("Unexpected error while writing!\n");
-					goto cleanup;
-					break;
-			}
+			len = ssl_write(ssl, buf, len);
 		}
 	}
 
@@ -499,80 +676,23 @@ cleanup:
 	pthread_exit( (void *) NULL );
 }
 
-
-void start_server(int port, char *local_address) {
+void 
+start_server(int port, char *local_address) 
+{
 	int fd;
-	union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in s4;
-		struct sockaddr_in6 s6;
-	} server_addr, client_addr;
+
+	RemoteAddress server_addr, client_addr;
 	pthread_t tid;
 	SSL_CTX *ctx;
 	SSL *ssl;
 	BIO *bio;
 	struct timeval timeout;
-	struct pass_info *info;
+	PassInfo* info;
 	const int on = 1, off = 0;
 
-	memset(&server_addr, 0, sizeof(struct sockaddr_storage));
-	if (strlen(local_address) == 0) {
-		server_addr.s6.sin6_family = AF_INET6;
-#ifdef HAVE_SIN6_LEN
-		server_addr.s6.sin6_len = sizeof(struct sockaddr_in6);
-#endif
-		server_addr.s6.sin6_addr = in6addr_any;
-		server_addr.s6.sin6_port = htons(port);
-	} else {
-		if (inet_pton(AF_INET, local_address, &server_addr.s4.sin_addr) == 1) {
-			server_addr.s4.sin_family = AF_INET;
-#ifdef HAVE_SIN_LEN
-			server_addr.s4.sin_len = sizeof(struct sockaddr_in);
-#endif
-			server_addr.s4.sin_port = htons(port);
-		} else if (inet_pton(AF_INET6, local_address, &server_addr.s6.sin6_addr) == 1) {
-			server_addr.s6.sin6_family = AF_INET6;
-#ifdef HAVE_SIN6_LEN
-			server_addr.s6.sin6_len = sizeof(struct sockaddr_in6);
-#endif
-			server_addr.s6.sin6_port = htons(port);
-		} else {
-			return;
-		}
-	}
-
+	fd = create_socket(&server_addr, local_address, port);
 	THREAD_setup();
-	OpenSSL_add_ssl_algorithms();
-	SSL_load_error_strings();
-    const SSL_METHOD* method = DTLSv1_server_method();
-	ctx = SSL_CTX_new(method);
-	/* We accept all ciphers, including NULL.
-	 * Not recommended beyond testing and debugging
-	 */
-	SSL_CTX_set_cipher_list(ctx, "ALL:NULL:eNULL:aNULL");
-	SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
-
-	if (!SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM))
-		printf("\nERROR: no certificate found!");
-
-	if (!SSL_CTX_use_PrivateKey_file(ctx, SSL_KEY, SSL_FILETYPE_PEM))
-		printf("\nERROR: no private key found!");
-
-	if (!SSL_CTX_check_private_key (ctx))
-		printf("\nERROR: invalid private key!");
-
-	/* Client has to authenticate */
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, dtls_verify_callback);
-
-	SSL_CTX_set_read_ahead(ctx, 1);
-	SSL_CTX_set_cookie_generate_cb(ctx, generate_cookie);
-	SSL_CTX_set_cookie_verify_cb(ctx, &verify_cookie);
-
-	fd = socket(server_addr.ss.ss_family, SOCK_DGRAM, 0);
-	if (fd < 0) {
-		perror("socket");
-		exit(-1);
-	}
+	ctx = create_configure_context();
 
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &on, (socklen_t) sizeof(on));
 #ifdef SO_REUSEPORT
@@ -588,24 +708,9 @@ void start_server(int port, char *local_address) {
 		bind(fd, (const struct sockaddr *) &server_addr, sizeof(struct sockaddr_in6));
 	}
 	while (1) {
-		memset(&client_addr, 0, sizeof(struct sockaddr_storage));
+		ssl = listen_with_ssl(fd, ctx, &client_addr);
 
-		/* Create BIO */
-		bio = BIO_new_dgram(fd, BIO_NOCLOSE);
-
-		/* Set and activate timeouts */
-		timeout.tv_sec = 5;
-		timeout.tv_usec = 0;
-		BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
-
-		ssl = SSL_new(ctx);
-
-		SSL_set_bio(ssl, bio, bio);
-		SSL_set_options(ssl, SSL_OP_COOKIE_EXCHANGE);
-
-		while (DTLSv1_listen(ssl, &client_addr) <= 0);
-
-		info = (struct pass_info*) malloc (sizeof(struct pass_info));
+		info = malloc (sizeof(PassInfo));
 		memcpy(&info->server_addr, &server_addr, sizeof(struct sockaddr_storage));
 		memcpy(&info->client_addr, &client_addr, sizeof(struct sockaddr_storage));
 		info->ssl = ssl;
@@ -619,7 +724,8 @@ void start_server(int port, char *local_address) {
 	THREAD_cleanup();
 }
 
-int main(int argc, char **argv)
+int 
+main(int argc, char **argv)
 {
 	int port = 23232;
 	char local_addr[INET6_ADDRSTRLEN+1];
