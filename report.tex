@@ -1,0 +1,130 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%2345678901234567890123456789012345678901234567890123456789012345678901234567890
+%        1         2         3         4         5         6         7         8
+
+\documentclass[letterpaper, 10 pt, conference]{ieeeconf}  % Comment this line out
+                                                          % if you need a4paper
+%\documentclass[a4paper, 10pt, conference]{ieeeconf}      % Use this line for a4
+                                                          % paper
+
+\IEEEoverridecommandlockouts                              % This command is only
+                                                          % needed if you want to
+                                                          % use the \thanks command
+\overrideIEEEmargins
+% See the \addtolength command later in the file to balance the column lengths
+% on the last page of the document
+
+
+
+% The following packages can be found on http:\\www.ctan.org
+%\usepackage{graphics} % for pdf, bitmapped graphics files
+%\usepackage{epsfig} % for postscript graphics files
+%\usepackage{mathptmx} % assumes new font selection scheme installed
+%\usepackage{times} % assumes new font selection scheme installed
+%\usepackage{amsmath} % assumes amsmath package installed
+%\usepackage{amssymb}  % assumes amsmath package installed
+
+\title{\LARGE \bf
+MiniVPN
+}
+
+%\author{ \parbox{3 in}{\centering Huibert Kwakernaak*
+%         \thanks{*Use the $\backslash$thanks command to put information here}\\
+%         Faculty of Electrical Engineering, Mathematics and Computer Science\\
+%         University of Twente\\
+%         7500 AE Enschede, The Netherlands\\
+%         {\tt\small h.kwakernaak@autsubmit.com}}
+%         \hspace*{ 0.5 in}
+%         \parbox{3 in}{ \centering Pradeep Misra**
+%         \thanks{**The footnote marks may be inserted manually}\\
+%        Department of Electrical Engineering \\
+%         Wright State University\\
+%         Dayton, OH 45435, USA\\
+%         {\tt\small pmisra@cs.wright.edu}}
+%}
+
+\author{Enes Aldemir, Baris Coskun}% <-this % stops a space
+
+
+\begin{document}
+
+
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Problem Statement}
+
+A Virtual Private Network (VPN) is used for creating a private scope of computer communications or providing a secure extension of a private network into an insecure network such as the Internet. VPN is a widely used security technology. VPN can be built upon IPSec or Secure Socket Layer (SSL). These are two fundamentally different approaches for building VPNs. MiniVPN is an example to latter category which is SSL based ones. 	
+
+\section{Related Works}
+
+There are numerous VPN solutions which some of them are close sourced and some of them are open sourced. OpenVPN is one of the most widely used VPN solution. OpenVPN is an open source VPN solution. Also, there are relatively small sized VPN solutions compared to the OpenVPN. These type of VPN solutions are trying to solve very specific problems generally. GoHop[1] can be given as an example to these type of projects. Its main aim is to escape from censorship and intelligent package inspection.[2] 
+
+\section{Approach}
+
+MiniVPN is developed for Ubuntu which is one of the Linux distributions. This project can be transferred easily to the other Unix-like operating systems with minor changes. 
+
+There are two essential feature of the any VPN program. One of them is creating virtaul network between host machines of the VPN users. Second of them is that communication between the host machines in this virtual network should be encrypted. 
+For the first essential feature which is creating virtual network, tunneling technique is used in this project. There are different tunneling techniques for the Linux. One of these is tun/tap interface feature. Tun/tap interfaces are a feature that can do userspace networking, that is, allow userspace programs to see raw network traffic (at the ethernet or IP level) and do whatever they like with it.[3] Tun/tap interfaces are software-only interfaces which means that they exist only in the kernel and they have no physical component like regular network interfaces. These interfaces provide abstraction to the OS while sending packets through network stack because OS behaves to the tun/tap interfaces like regular network interfaces. Due to these properties, tun/tap interfaces are suitable for creating tunnels between machines. Tunnel will be created with the help of the userspace program which runs on the all the machines which are parts of the VPN. These userspace programs will be read from the tun/tap interface which is initialized before and write to the real network interface which is connected to outside word. Also, user-space program will read from the real network interface if there are any available packets on it and it will write these packets to the tun/tap interface. If the users of the VPN wants to use VPN connections for their normal internet usage in their host machines, regular network traffic should be directed to the tun/tap interface. These restrictions can be provided with the help of the tools like 'route'[4] in  the Linux machines.
+
+For the second essential feature which is encrypted communication, SSL is decided to use. 
+Initially, we planned to use SSL for only control channel which will be used for interchanging symmetric encryption keys mainly. After interchange the keys, symmetric encryption will be used between host machines to continue to the encrypted communication. However, after second thought, we decided that it will be like reinvent the TLS and we can introduce some vulnerability in this process and we decided to use a widely used and well tested protocol which is DTLS. The DTLS protocol provides communications privacy for datagram protocols.[6] Main reason of the using this protocol is that it is based on the UDP which will prevent the  'TCP over TCP[5]' problem. We decided to use OpenVPN implementation of the DTLS for this project. 
+
+\section{Implementation}
+
+Since this project is planned as proof-of-concept, there are some missing features such as dynamic IP allocation, more than client on the VPN or user authentication. Allocated IP's are predetermined and hard-coded in the init scripts.  
+
+As stated in the 'Approach' part, tun/tap interfaces are used for creating tunnels. Initially, tun/tap interface should be initialized before use them. 'ip'[7] command will be used for this purpose. Before starting the client or server VPN program, init scripts need to be called. After tun/tap interfaces are initialized VPN programs are ready to started. There are two types of this programs. One of them is client and one of them is server. Server client is listening whether there are any incoming requests and if there are any incoming requests, server program creates new thread and communication between client and server continues in this thread. Since it stated that UDP is used in this project before, it can be confusing to say that server program is creating new connection between client and server. However, as stated before, DTLS is used for encryption and DTLS creates connections like in the TCP. DTLS usage will be explained in detailed later on. As can be guessed, client program connects to the server program in the beginning of the program and start to send packets if there are any new incoming packets from tun/tap interface. This explains reason of the communication between two machines using UDP. Also, there is an in-host communication which will be done using tun/tap interfaces. Tun/tap interfaces are used for directing the client's network traffic to the server and vice versa. Client and server programs are connecting to the tun/tap interface which is initialized before. After connecting the tun/tap interface, network traffic of the client machine should be directed to the tun/tap interface. However, if all the network traffic is directed to the tun/tap interface, server connection will be closed. Therefore, all the network traffic except through server IP one should be directed to tun/tap interface. Server IP traffic should continue through real network interface which is 'eth0' with our project config.
+Redirecting network traffic will be done with 'route' command in the Linux. 'route' command is used for configuration of the gateway address of the destination addresses. As stated in the above, all the network traffic except server traffic will be directed to the tun/tap interface IP. You can see before and after route command list in the Figure X. As you can see all the network traffic which is noted with 0.0.0.0 is directed to the eth0 interface with local IP 10.0.2.2. After configuration with the 'route' command, all the network traffic is directed to the tun0 interface with  local IP 10.0.3.3. However, there is one more entry which is network traffic to 167.99.32.110 is directed to the eth0 interface. As you can guess, 167.99.32.110 is server IP address and in order to continue the tunnel connection with the server, client 
+machine continues to connect server IP through eth0 interface which connects client to the outside network. There will be made some configuration on the server too. All the traffic which coming through tun/tap interface should be forwarded to the 'eth0' interface in order to send request of the client to the outside word. With this way, all network traffic of the client will be through server and outside world will see server IP instead of client IP. Forwarding from tun/tap interface to eth0 interface will be done using 'iptables'[8] command. 
+Scenario which is described on the above is used for accessing outside world with the different IP. VPN can be used other than the specified purpose too. It is just one of the usages of VPN. 
+
+All the above configurations are done with the shell scripts which is written for these specific purposes. Essential implementation of the VPN is made on the server and client program. As stated on the above, server program listens for incoming connection requests from the client and if there is one, starts new thread and communication between server and client continues in this handled in this thread in the server side. Both client side and server side create file descriptor for reading from tun/tap interface and writing to tun/tap interface. Both network socket and tun/tap descriptor is listen with using 'select'[9] functions. In case of new packet arriving in the one of the interface, blocking 'select' function notifies the program and program continue to execution according to the interface which packet arrived. If packet arrived through real network interface which 'eth0' in our project, it should be directed to the tun/tap interface because packets which arrived from real network interface have to be VPN packet therefore should be directed to the tun/tap interface. Packets which is directed to the tun/tap interface will be directed to the respectective userspace program by kernel as it came from the real network interface. If packet arrived through tun/tap interface, it should be directed to the real network interface. In this way, VPN connection will be provided because any userspace program which sending its packet to the tun/tap interface will be redirected to the server IP address and with this way, all the traffic of the user will be through server IP. 
+
+As stated in the 'Approach' part, second essential part of the VPN is encrypted communication between server and client. Encryption is provided with the help of DTLS implementation of the OpenSSL. The DTLS protocol provides communications privacy for datagram protocols. The DTLS protocol is based on the TLS protocol therefore keys and certificate should be generated for secure communication. Keys and certificates are generated with the help of OpenSSL. Generated keys and certificates will be given  necessary methods in the client and server. After necessary initializations are done in the client and server programs, file desciptor of the real network interface sockets will be fed to the SSL object which is created before. Newly generated SSL objects will be used for secure communication between client and server. All the network traffic through newly generated SSL objects will be encrypted.
+
+\section{Conclusion}
+
+In this project, we have tried to implement proof-of-concept VPN solution for Linux. There are still major missing features in this project as stated in the 'Approach' part. However, it contains most essential components of a VPN such as tunneling and encrypted communication between client and server and can be used as learning material. 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{thebibliography}{99}
+
+\bibitem{c1} https://censorbib.nymity.ch/pdf/Wang2014a.pdf
+
+\bibitem{c2} https://censorbib.nymity.ch/pdf/Wang2014a.pdf
+
+\bibitem{c3} http://backreference.org/2010/03/26/tuntap-interface-tutorial/
+
+\bibitem{c4} http://man7.org/linux/man-pages/man8/route.8.html
+
+\bibitem{c5} http://sites.inka.de/bigred/devel/tcp-tcp.html
+
+\bibitem{c6} https://tools.ietf.org/html/rfc6347
+
+\bibitem{c7} https://linux.die.net/man/8/ip
+
+\bibitem{c8} http://ipset.netfilter.org/iptables.man.html
+
+\bibitem{c9}http://man7.org/linux/man-pages/man2/select.2.html
+
+\end{thebibliography}
+
+
+
+
+\end{document}
