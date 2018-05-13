@@ -1,34 +1,3 @@
-/*
- * Copyright (C) 2009 - 2012 Robin Seggelmann, seggelmann@fh-muenster.de,
- *                           Michael Tuexen, tuexen@fh-muenster.de
- *
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the project nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE PROJECT AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE PROJECT OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -57,6 +26,7 @@
 #define BUFFER_SIZE          (1<<16)
 #define COOKIE_SECRET_LENGTH 16
 
+#define CERT_KEY_FILE_NAME_SIZE 500
 #define SSL_CERT "/vagrant/cert.pem"
 #define SSL_KEY "/vagrant/key.pem"
 #define TUN_IF_NAME "tun0"
@@ -73,14 +43,14 @@ unsigned char cookie_secret[COOKIE_SECRET_LENGTH];
 int cookie_initialized=0;
 
 char Usage[] =
-"Usage: dtls_udp_echo [options] [address]\n"
+"Usage: client [options] [address]\n"
 "Options:\n"
-"        -l      message length (Default: 100 Bytes)\n"
-"        -p      port (Default: 23232)\n"
-"        -n      number of messages to send (Default: 5)\n"
-"        -L      local address\n"
-"        -v      verbose\n"
-"        -V      very verbose\n";
+"        -i <ifacename>: Name of tun/tap interface to use \n"
+"        -s <serverIP>: Server address to connect \n"
+"        -p <port>: Port to connect to server\n"
+"        -c <ssl_cert>: Path of the SSL cert\n"
+"        -k <ssl_key>: Path of the SSL key\n"
+"        -h help\n";
 
 int 
 handle_socket_error() 
@@ -196,14 +166,14 @@ create_context()
 }
 
 void
-configure_context(SSL_CTX *ctx)
+configure_context(SSL_CTX *ctx, char* ssl_cert, char* ssl_key)
 {
 	// SSL_CTX_set_cipher_list(ctx, "eNULL:!MD5");
 
-	if (!SSL_CTX_use_certificate_file(ctx, SSL_CERT, SSL_FILETYPE_PEM))
+	if (!SSL_CTX_use_certificate_file(ctx, ssl_cert, SSL_FILETYPE_PEM))
 		printf("\nERROR: no certificate found!");
 
-	if (!SSL_CTX_use_PrivateKey_file(ctx, SSL_KEY, SSL_FILETYPE_PEM))
+	if (!SSL_CTX_use_PrivateKey_file(ctx, ssl_key, SSL_FILETYPE_PEM))
 		printf("\nERROR: no private key found!");
 
 	if (!SSL_CTX_check_private_key (ctx))
@@ -214,7 +184,7 @@ configure_context(SSL_CTX *ctx)
 }
 
 SSL*
-connect_with_ssl(int fd, RemoteAddress* remote_addr)
+connect_with_ssl(int fd, RemoteAddress* remote_addr, char* ssl_cert, char* ssl_key)
 {
 	SSL_CTX *ctx;
 	SSL *ssl;
@@ -224,7 +194,7 @@ connect_with_ssl(int fd, RemoteAddress* remote_addr)
 	
 	init_openssl();
 	ctx = create_context();
-	configure_context(ctx);
+	configure_context(ctx, ssl_cert, ssl_key);
 
 	ssl = SSL_new(ctx);
 
@@ -383,7 +353,7 @@ tun_alloc(char *dev, int flags)
 }
 
 void 
-start_client(char *remote_address, int port, int length, int messagenumber) 
+start_client(char *remote_address, int port, char* tun_if_name, char* ssl_cert, char* ssl_key) 
 {
 	int fd, tap_fd, max_fd;
 	char buf[BUFFER_SIZE];
@@ -397,10 +367,10 @@ start_client(char *remote_address, int port, int length, int messagenumber)
 	char if_name[IFNAMSIZ];
 
 	fd = create_socket(&remote_addr, remote_address, port);
-	ssl = connect_with_ssl(fd, &remote_addr);
+	ssl = connect_with_ssl(fd, &remote_addr, ssl_cert, ssl_key);
 
 	/* initialize tun/tap interface */
-	strncpy(if_name, TUN_IF_NAME, IFNAMSIZ-1);
+	strncpy(if_name, tun_if_name, IFNAMSIZ-1);
 	if ( (tap_fd = tun_alloc(if_name, IFF_TUN | IFF_NO_PI)) < 0 ) {
 		printf("Error connecting to tun/tap interface %s!\n", if_name);
 		exit(1);
@@ -460,15 +430,73 @@ start_client(char *remote_address, int port, int length, int messagenumber)
 		printf("Connection closed.\n");
 }
 
+void
+usage()
+{
+	printf(Usage);
+	exit(1);
+}
+
+void 
+my_err(char *msg, ...) 
+{
+  va_list argp;
+  
+  va_start(argp, msg);
+  vfprintf(stderr, msg, argp);
+  va_end(argp);
+}
+
 int 
 main(int argc, char **argv)
 {
-	int port = 23232;
-	int length = 100;
-	int messagenumber = 5;
-	// char remote_addr[INET6_ADDRSTRLEN+1] = "10.10.1.2";	
-	char remote_addr[INET6_ADDRSTRLEN+1] = "167.99.32.110";	
+	char tun_if_name[IFNAMSIZ] = "";
+	strncpy(tun_if_name, TUN_IF_NAME, IFNAMSIZ-1);	
+	int port;
+	char remote_addr[INET6_ADDRSTRLEN+1] = "";	
+	int opt;
+	char ssl_cert[CERT_KEY_FILE_NAME_SIZE] = "";
+	char ssl_key[CERT_KEY_FILE_NAME_SIZE] = "";
+	// int port = 23232;
+	// char remote_addr[INET6_ADDRSTRLEN+1] = "10.10.1.2";		
+	// char remote_addr[INET6_ADDRSTRLEN+1] = "167.99.32.110";
 
-    start_client(remote_addr, port, length, messagenumber);
+	/* Check command line options */
+	int num_of_must_arguments = 5;
+	while((opt = getopt(argc, argv, "i:s:p:h:c:k:")) > 0) {
+		switch(opt) {
+		case 'h':
+			usage();
+			break;
+		case 'i':
+			strncpy(tun_if_name, optarg, IFNAMSIZ-1);
+			break;
+		case 's':
+			strncpy(remote_addr, optarg, INET6_ADDRSTRLEN+1);
+			break;
+		case 'p':
+			port = atoi(optarg);
+			break;
+		case 'c':
+			strncpy(ssl_cert, optarg, CERT_KEY_FILE_NAME_SIZE-1);
+			break;
+		case 'k':
+			strncpy(ssl_key, optarg, CERT_KEY_FILE_NAME_SIZE-1);
+			break;
+		default:
+			my_err("Unknown option %c\n");
+			usage();
+		}
+	}
+
+	// every arguments must have flag too, therefore every
+	// one of them will add 2 to argc
+	// also, progname will increase argc one more
+	if(argc != num_of_must_arguments * 2 + 1) {
+		my_err("Check it out the usage!\n");
+		usage();
+	}	
+
+    start_client(remote_addr, port, tun_if_name, ssl_cert, ssl_key);
 	return 0;
 }
