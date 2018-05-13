@@ -6,7 +6,7 @@
 # to run VPN. 
 
 Example commands:
-sudo route add -net 167.99.32.110 gw 10.0.2.2 netmask 255.255.255.255 dev eth0
+sudo route add -net 188.166.77.84 gw 10.0.2.2 netmask 255.255.255.255 dev eth0
 sudo route del -net 0.0.0.0 gw 10.0.2.2 netmask 0.0.0.0 dev eth0
 sudo route add default gw 10.0.3.3
 
