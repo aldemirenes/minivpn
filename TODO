@@ -1,5 +1,0 @@
-- Add scripts to run at the setup of the Vagrant machines
-- Install libssl-dev in these scripts 
-- Make research about the woring principle of the DTSL
-- Analyze the connection with tcpdump in order to validate
-  connection is encrpyted
